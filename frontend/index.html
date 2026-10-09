@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>One Line Drawing</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;500;600;700;800&display=swap">
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<div class="app">
+  <div>
+    <p class="brand">Trò chơi trí tuệ</p>
+    <h1>One Line Drawing</h1>
+  </div>
+
+  <div class="account" id="account" hidden><span id="accText"></span><button class="link" id="authBtn" type="button"></button></div>
+
+  <div class="card">
+    <div class="avatar" id="avatar" aria-hidden="true">B</div>
+    <div class="who"><b id="pname">Bạn</b><span class="sync" id="sync" data-state="local">Lưu trên máy này</span></div>
+    <div class="stat">
+      <small class="lvlnav"><button id="prev" aria-label="Màn trước">‹</button><span id="lvlLabel">Màn 1/100</span><button id="next" aria-label="Màn sau">›</button></small>
+      <b id="timer">0:00</b>
+    </div>
+    <div class="sep"></div>
+    <div class="stat"><small>Điểm</small><b id="score">0/0</b></div>
+  </div>
+
+  <div class="board" id="board">
+    <svg id="grid" aria-label="Bảng chơi"></svg>
+    <p class="hint" id="hint">Chạm vào một điểm bất kỳ để bắt đầu vẽ</p>
+    <div class="overlay" id="overlay" hidden>
+      <div class="modal">
+        <h2 id="mTitle">Hoàn thành!</h2>
+        <p id="mText"></p>
+        <button class="btn primary" id="mMain">Màn tiếp theo</button>
+        <button class="btn" id="mAlt">Chơi lại</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="actions">
+    <button class="btn" id="giveup">Bỏ cuộc</button>
+    <button class="btn" id="reset">Reset</button>
+  </div>
+  <button class="link" id="helpBtn">📖 Xem hướng dẫn chơi</button>
+  <div class="help" id="help" hidden>
+    <b>Cách chơi</b>
+    <ul>
+      <li>Chọn một điểm bất kỳ để bắt đầu, rồi kéo (hoặc chạm) sang điểm kề bên theo chiều ngang hoặc dọc.</li>
+      <li>Đi qua <b>tất cả</b> các điểm, mỗi điểm đúng một lần, bằng một nét liền.</li>
+      <li>Không đi vào ô có dấu ✕.</li>
+      <li>Chạm lại điểm đã đi để quay lui về điểm đó. Kéo ngược lại để xoá bước vừa đi.</li>
+      <li>Mỗi màn bảng to hơn và có nhiều ô chặn hơn. Màn nào cũng có lời giải.</li>
+    </ul>
+  </div>
+  <div class="authwrap" id="auth" hidden role="dialog" aria-modal="true" aria-labelledby="authTitle">
+    <form class="modal" id="authForm" novalidate>
+      <h2 id="authTitle">Đăng nhập</h2>
+      <label class="field">Tên đăng nhập<input id="authUser" name="username" autocomplete="username" required minlength="3" maxlength="20" autocapitalize="off" spellcheck="false"></label>
+      <label class="field">Mật khẩu<input id="authPass" name="password" type="password" autocomplete="current-password" required minlength="6" maxlength="100"></label>
+      <label class="field" id="authPass2Row" hidden>Nhập lại mật khẩu<input id="authPass2" name="password2" type="password" autocomplete="new-password" maxlength="100"></label>
+      <p class="authhint" id="authHint" hidden>Tên 3–20 ký tự (chữ không dấu, số, _ và .), mật khẩu từ 6 ký tự. Tiến trình bạn đang chơi thử sẽ được giữ lại.</p>
+      <p class="autherr" id="authErr" role="alert"></p>
+      <button class="btn primary" id="authSubmit" type="submit">Đăng nhập</button>
+      <button class="link" id="authSwitch" type="button">Chưa có tài khoản? Đăng ký</button>
+      <button class="btn" id="authCancel" type="button">Để sau</button>
+    </form>
+  </div>
+  <section class="lb" id="lb" hidden>
+    <h2>Bảng xếp hạng <small>số màn đã qua · tổng thời gian kỷ lục</small></h2>
+    <ol id="lbList"></ol>
+    <p id="lbEmpty">Chưa có ai trên bảng. Qua màn đầu tiên để ghi tên mình.</p>
+  </section>
+</div>
+
+<script src="js/config.js"></script>
+<script src="js/levels.js"></script>
+<script src="js/game.js"></script>
+<script src="js/sync.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>
