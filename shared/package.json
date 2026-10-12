@@ -1,0 +1,5 @@
+{
+  "private": true,
+  "type": "module",
+  "description": "Code dùng chung cho frontend và backend: sinh màn, kiểm tra đường vẽ"
+}

@@ -1,4 +1,4 @@
-// One Line Drawing — backend API: tài khoản, đăng nhập, lưu tiến trình, bảng xếp hạng.
+// One Line Drawing — backend API: tài khoản, đăng nhập, kiểm tra kết quả chơi, lưu tiến trình, bảng xếp hạng.
 // Cần Node.js 20.12+.  Lần đầu: npm install.  Chạy: npm start
 //
 // Biến môi trường (đặt trong file .env cạnh server.js, xem .env.example):
@@ -6,42 +6,54 @@
 //   MONGODB_DB=...            tên database, mặc định lấy từ chuỗi kết nối
 //   PORT=3000                 cổng chạy
 //   ALLOWED_ORIGINS=...       các địa chỉ frontend được gọi API, cách nhau bằng dấu phẩy
+//   GAME_SECRET=...           chuỗi bí mật để ký chứng nhận qua màn của khách (nên đặt, xem .env.example)
 //   COOKIE_SECURE=1           bật khi chạy qua HTTPS (bắt buộc khi đưa lên mạng)
 //   COOKIE_SAMESITE=None      chỉ cần khi frontend và backend ở hai tên miền khác hẳn nhau (đi kèm COOKIE_SECURE=1)
-//   FRONTEND_DIR=...          thư mục frontend để backend phục vụ luôn (mặc định ../frontend nếu có)
+//   FRONTEND_DIR=...          thư mục frontend đã build để backend phục vụ luôn (mặc định ../frontend/dist nếu có)
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 // đọc file .env nếu có (Node 20.12+ có sẵn, không cần thư viện dotenv)
 try { process.loadEnvFile(path.join(__dirname, '.env')); } catch { /* không có .env thì dùng biến môi trường của hệ thống */ }
-const { createStore } = require('./lib/store');
+const { createStore, MODES } = require('./lib/store');
 const auth = require('./lib/auth');
+const game = require('./lib/game');
 
 const PORT = Number(process.env.PORT) || 3000;
-const MAX_LEVEL = 100;
+const { MAX_LEVEL } = game;
+const ROUND_HOURS = 6;
 const COOKIE_OPTS = { secure: process.env.COOKIE_SECURE === '1', sameSite: process.env.COOKIE_SAMESITE || 'Lax' };
 const ALLOWED_ORIGINS = new Set((process.env.ALLOWED_ORIGINS ||
   'http://localhost:3000,http://localhost:5500,http://127.0.0.1:5500,http://localhost:5173,http://localhost:8080')
   .split(',').map(s => s.trim()).filter(Boolean));
-const FRONTEND_DIR = path.resolve(process.env.FRONTEND_DIR || path.join(__dirname, '..', 'frontend'));
+// mặc định phục vụ bản build React (../frontend/dist, tạo bằng `npm run build` trong frontend)
+const FRONTEND_DIR = path.resolve(process.env.FRONTEND_DIR || path.join(__dirname, '..', 'frontend', 'dist'));
 const SERVE_FRONTEND = fs.existsSync(path.join(FRONTEND_DIR, 'index.html'));
 let store; // gán sau khi kết nối MongoDB, xem cuối file
 
-/* ---------- tiến trình ---------- */
-const int = (v, lo, hi) => Number.isInteger(v) && v >= lo && v <= hi;
+/* ---------- tiến trình ----------
+   Trình duyệt không tự báo "đã qua màn": mỗi lượt chơi bắt đầu bằng POST /api/rounds (server ghi giờ),
+   khi vẽ xong gửi cả đường vẽ lên POST /api/rounds/finish, server kiểm tra rồi mới ghi nhận. */
 const emptyProgress = () => ({ unlocked: 1, level: 1, best: {} });
-function cleanProgress(p) {
-  if (!p || typeof p !== 'object') return null;
-  if (!int(p.unlocked, 1, MAX_LEVEL) || !int(p.level, 1, MAX_LEVEL)) return null;
-  const best = {};
-  for (const [k, v] of Object.entries(p.best || {})) {
-    const L = Number(k);
-    if (int(L, 1, MAX_LEVEL) && int(v, 0, 86400)) best[L] = v;
+const isMode = m => MODES.includes(m);
+
+/** Gộp các chứng nhận qua màn lúc chơi thử vào tài khoản, theo thứ tự màn (màn chưa mở thì bỏ qua). */
+async function applyReceipts(user, receipts) {
+  if (!Array.isArray(receipts)) return user;
+  const wins = receipts.slice(0, 400).map(game.readReceipt).filter(Boolean)
+    .sort((a, b) => a.mode.localeCompare(b.mode) || a.level - b.level);
+  for (const w of wins) {
+    if (w.level > (user.progress?.[w.mode]?.unlocked || 1)) continue;
+    user = await store.recordWin(user._id, w.mode, w.level, w.time, MAX_LEVEL) || user;
   }
-  return { unlocked: p.unlocked, level: Math.min(p.level, p.unlocked), best };
+  return user;
 }
-const publicUser = u => ({ username: u.username, createdAt: u.createdAt, progress: { ...u.progress, level: Math.min(u.progress.level, u.progress.unlocked) } });
+const publicProgress = all => Object.fromEntries(MODES.map(m => {
+  const p = all?.[m] || emptyProgress();
+  return [m, { unlocked: p.unlocked, level: Math.min(p.level || 1, p.unlocked), best: p.best || {} }];
+}));
+const publicUser = u => ({ username: u.username, createdAt: u.createdAt, progress: publicProgress(u.progress) });
 
 /* ---------- http helpers ---------- */
 function send(res, code, body, headers = {}) {
@@ -53,7 +65,7 @@ function readJson(req) {
   if (!(req.headers['content-type'] || '').startsWith('application/json')) return Promise.reject(new Error('json required'));
   return new Promise((resolve, reject) => {
     let size = 0; const chunks = [];
-    req.on('data', c => { size += c.length; if (size > 16384) { reject(new Error('too large')); req.destroy(); } else chunks.push(c); });
+    req.on('data', c => { size += c.length; if (size > 65536) { reject(new Error('too large')); req.destroy(); } else chunks.push(c); });
     req.on('end', () => { try { resolve(JSON.parse(Buffer.concat(chunks).toString('utf8'))); } catch (e) { reject(e); } });
     req.on('error', reject);
   });
@@ -93,17 +105,21 @@ const routes = {
     if (c.error) return send(res, 400, { error: c.error });
     const taken = { error: 'Tên đăng nhập này đã có người dùng.' };
     if (await store.findUserByName(c.username)) return send(res, 409, taken);
-    // tiến trình chơi thử trước khi đăng ký được giữ lại
-    const guest = cleanProgress(body.progress);
-    const user = await store.createUser({
+    let user = await store.createUser({
       _id: crypto.randomUUID(),
       username: c.username,
       usernameLower: c.username.toLowerCase(),
       passwordHash: await auth.hashPassword(c.password),
       createdAt: new Date(),
-      progress: guest || emptyProgress(),
+      progress: Object.fromEntries(MODES.map(m => [m, emptyProgress()])),
     });
     if (!user) return send(res, 409, taken); // hai người đăng ký cùng tên cùng lúc
+    user = await applyReceipts(user, body.receipts); // các màn đã qua lúc chơi thử
+    // tiếp tục ở màn đang chơi thử (nếu màn đó đã mở)
+    for (const m of MODES) {
+      const L = body.levels?.[m];
+      if (game.isLevel(L) && L > 1) user = await store.setLevel(user._id, m, L) || user;
+    }
     await startSession(res, user, { user: publicUser(user) });
   },
 
@@ -117,9 +133,7 @@ const routes = {
     const ok = await auth.verifyPassword(password, user?.passwordHash);
     if (!user || !ok) { auth.recordFailure(key); return send(res, 401, { error: 'Sai tên đăng nhập hoặc mật khẩu.' }); }
     auth.clearFailures(key);
-    const guest = cleanProgress(body.progress);
-    // giữ màn đang chơi của tài khoản, chỉ gộp thêm các màn đã qua lúc chơi thử
-    if (guest) user = await store.mergeProgress(user._id, guest, { keepLevel: true });
+    user = await applyReceipts(user, body.receipts); // giữ màn đang chơi, gộp thêm các màn đã qua lúc chơi thử
     await startSession(res, user, { user: publicUser(user) });
   },
 
@@ -135,19 +149,62 @@ const routes = {
     send(res, 200, { user: publicUser(s.user) });
   },
 
+  // đổi màn đang chơi (chỉ được chọn màn đã mở)
   'PUT /api/progress': async (req, res) => {
     const s = await currentSession(req);
     if (!s) return send(res, 401, { error: 'Chưa đăng nhập' });
-    const progress = cleanProgress((await readJson(req)).progress);
-    if (!progress) return send(res, 400, { error: 'Dữ liệu tiến trình không hợp lệ' });
-    const user = await store.mergeProgress(s.user._id, progress);
-    send(res, 200, { progress: user.progress });
+    const body = await readJson(req);
+    if (!isMode(body.mode) || !game.isLevel(body.level)) return send(res, 400, { error: 'Dữ liệu không hợp lệ' });
+    const user = await store.setLevel(s.user._id, body.mode, body.level);
+    if (!user) return send(res, 403, { error: 'Màn này chưa mở' });
+    send(res, 200, { mode: body.mode, progress: publicProgress(user.progress)[body.mode] });
   },
 
-  'GET /api/leaderboard': async (req, res) => {
+  // bắt đầu một lượt chơi: server ghi lại giờ bắt đầu
+  'POST /api/rounds': async (req, res) => {
+    const s = await currentSession(req);
+    const body = await readJson(req);
+    if (!isMode(body.mode) || !game.isLevel(body.level)) return send(res, 400, { error: 'Dữ liệu không hợp lệ' });
+    if (s && body.level > (s.user.progress?.[body.mode]?.unlocked || 1)) return send(res, 403, { error: 'Màn này chưa mở' });
+    const now = Date.now();
+    const roundId = auth.newToken();
+    await store.createRound({
+      _id: roundId, userId: s?.user._id ?? null, mode: body.mode, level: body.level,
+      startedAt: new Date(now), expiresAt: new Date(now + ROUND_HOURS * 3600e3),
+    });
+    send(res, 200, { roundId });
+  },
+
+  // nộp đường vẽ: kiểm tra hợp lệ, tự tính thời gian, rồi mới ghi nhận qua màn
+  'POST /api/rounds/finish': async (req, res) => {
+    const s = await currentSession(req);
+    const body = await readJson(req);
+    const round = typeof body.roundId === 'string' ? await store.takeRound(body.roundId) : null;
+    if (!round) return send(res, 404, { error: 'Lượt chơi không tồn tại hoặc đã hết hạn' });
+    if (round.userId !== (s?.user._id ?? null)) return send(res, 403, { error: 'Lượt chơi không thuộc về bạn' });
+    const elapsed = (Date.now() - round.startedAt.getTime()) / 1000;
+    const reason = game.judge(round.mode, round.level, body.path, elapsed);
+    if (reason) return send(res, 422, { error: reason });
+    const time = Math.floor(elapsed);
+    if (!s) return send(res, 200, { mode: round.mode, level: round.level, time, receipt: game.makeReceipt(round.mode, round.level, time) });
+    const user = await store.recordWin(s.user._id, round.mode, round.level, time, MAX_LEVEL);
+    send(res, 200, { mode: round.mode, level: round.level, time, progress: publicProgress(user.progress)[round.mode] });
+  },
+
+  // lời giải, khi người chơi bỏ cuộc (màn Khó không gửi sẵn lời giải xuống trình duyệt)
+  'GET /api/solution': async (req, res, url) => {
+    const mode = url.searchParams.get('mode');
+    const level = Number(url.searchParams.get('level'));
+    if (!isMode(mode) || !game.isLevel(level)) return send(res, 400, { error: 'Dữ liệu không hợp lệ' });
+    send(res, 200, { path: game.solution(mode, level) });
+  },
+
+  'GET /api/leaderboard': async (req, res, url) => {
     const me = (await currentSession(req))?.user._id;
-    const rows = (await store.leaderboard(20))
-      .map(u => ({ name: u.username, solved: u.stats.solved, totalTime: u.stats.totalTime, me: u._id === me })); // không lộ id người khác
+    const mode = url.searchParams.get('mode') || 'medium';
+    if (!isMode(mode)) return send(res, 400, { error: 'Chế độ chơi không hợp lệ' });
+    const rows = (await store.leaderboard(mode, 20))
+      .map(u => ({ name: u.username, solved: u.stats[mode].solved, totalTime: u.stats[mode].totalTime, me: u._id === me })); // không lộ id người khác
     send(res, 200, { rows });
   },
 };
@@ -175,15 +232,15 @@ const server = http.createServer(async (req, res) => {
         return res.end();
       }
       const handler = routes[`${req.method} ${url.pathname.replace(/\/$/, '')}`];
-      return handler ? await handler(req, res) : send(res, 404, { error: 'Không có API này' });
+      return handler ? await handler(req, res, url) : send(res, 404, { error: 'Không có API này' });
     }
     // phục vụ luôn frontend (tiện khi chạy thử hoặc khi đưa cả hai lên cùng một server)
-    if (!SERVE_FRONTEND) { res.writeHead(404); return res.end('Not found'); }
+    if (!SERVE_FRONTEND) { res.writeHead(404); return res.end('Chưa có bản build frontend. Chạy `npm run build` trong thư mục frontend, hoặc dùng `npm run dev`.'); }
     const file = path.join(FRONTEND_DIR, url.pathname === '/' ? 'index.html' : path.normalize(decodeURIComponent(url.pathname)));
     if (!file.startsWith(FRONTEND_DIR + path.sep)) { res.writeHead(403); return res.end(); }
     fs.readFile(file, (err, data) => {
       if (err) { res.writeHead(404); return res.end('Not found'); }
-      const type = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.svg': 'image/svg+xml' }[path.extname(file)] || 'application/octet-stream';
+      const type = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.woff2': 'font/woff2' }[path.extname(file)] || 'application/octet-stream';
       res.writeHead(200, { 'Content-Type': type });
       res.end(data);
     });
@@ -200,6 +257,7 @@ async function main() {
     console.error('Thiếu MONGODB_URI. Tạo file backend/.env từ .env.example rồi điền chuỗi kết nối MongoDB.');
     process.exit(1);
   }
+  await game.init();
   try {
     store = await createStore(process.env.MONGODB_URI, process.env.MONGODB_DB);
   } catch (e) {
